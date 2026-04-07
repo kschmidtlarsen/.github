@@ -181,7 +181,7 @@ jobs:
         id: lint
         working-directory: ${{ inputs.working-directory }}
         run: npm run lint
-        continue-on-error: ${{ !inputs.lint-hard-fail }}
+        continue-on-error: ${{ inputs.lint-hard-fail == false }}
 
       # ── Unit Tests ────────────────────────────────────
       - name: Unit tests
@@ -226,7 +226,7 @@ jobs:
           key: pw-${{ runner.os }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
 
       - name: Install Playwright browsers
-        if: inputs.run-e2e && (steps.pw-cache.outputs.cache-hit != 'true' || !inputs.cache-playwright)
+        if: inputs.run-e2e && (steps.pw-cache.outputs.cache-hit != 'true' || inputs.cache-playwright == false)
         working-directory: ${{ inputs.working-directory }}
         run: npx playwright install --with-deps chromium
 
@@ -238,7 +238,10 @@ jobs:
         id: e2e
         if: inputs.run-e2e
         working-directory: ${{ inputs.working-directory }}
-        run: npx playwright test --reporter=json,html ${{ inputs.e2e-grep && format('--grep {0}', inputs.e2e-grep) || '' }}
+        run: |
+          GREP_ARG=""
+          if [ -n "${{ inputs.e2e-grep }}" ]; then GREP_ARG="--grep ${{ inputs.e2e-grep }}"; fi
+          npx playwright test --reporter=json,html $GREP_ARG
         env:
           PLAYWRIGHT_JSON_OUTPUT_FILE: test-results.json
         continue-on-error: true
