@@ -328,9 +328,9 @@ jobs:
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| ESLint | ${{ steps.lint.outcome }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Unit Tests | ${{ steps.unit.outcome }} |" >> $GITHUB_STEP_SUMMARY
-          [ "${{ inputs.run-npm-audit }}" = "true" ] && echo "| npm audit | ${{ steps.audit.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          [ "${{ inputs.run-npm-audit }}" = "true" ] && echo "| npm audit | ${{ steps.audit.outcome }} |" >> $GITHUB_STEP_SUMMARY || true
           echo "| SonarCloud | ${{ steps.sonar.outcome }} |" >> $GITHUB_STEP_SUMMARY
-          [ "${{ inputs.run-e2e }}" = "true" ] && echo "| E2E Tests | ${{ steps.e2e.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          [ "${{ inputs.run-e2e }}" = "true" ] && echo "| E2E Tests | ${{ steps.e2e.outcome }} |" >> $GITHUB_STEP_SUMMARY || true
 
       - name: Upload Playwright Report
         uses: actions/upload-artifact@v4
