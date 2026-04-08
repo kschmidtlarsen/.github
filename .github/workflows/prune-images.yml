@@ -14,112 +14,38 @@ on:
         type: number
         default: 5
 
-env:
-  KEEP_VERSIONS: ${{ github.event.inputs.keep-versions || 5 }}
-  DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
-  OWNER: kschmidtlarsen
-
 jobs:
   prune:
-    name: Prune Old Package Versions
+    name: Prune Package - ${{ matrix.package }}
     runs-on: ubuntu-latest
     permissions:
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - kanban
+          - mimir
+          - calify
+          - chiefofstaff
+          - grablist
+          - forseti
+          - wodforge
+          - nighttales
+          - nytsyn
+          - stuffbase
+          - schmidt-larsen
+          - sorring3d
+          - sorring-udlejning
+          - eir
+          - yggdrasil
 
     steps:
-      - name: Prune ghcr.io images
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          echo "=== Docker Image Pruning ==="
-          echo "Keep versions: $KEEP_VERSIONS (plus latest)"
-          echo "Dry run: $DRY_RUN"
-          echo ""
-
-          TOTAL_DELETED=0
-          TOTAL_KEPT=0
-
-          # List all container packages for the user
-          PACKAGES=$(gh api "/users/$OWNER/packages?package_type=container&per_page=100" -q '.[].name' 2>&1) || {
-            echo "Failed to list packages: $PACKAGES"
-            exit 1
-          }
-
-          for PKG in $PACKAGES; do
-            echo "--- Package: $PKG ---"
-
-            # Get all versions (paginated, collect into single array)
-            VERSIONS=$(gh api "/users/$OWNER/packages/container/$PKG/versions?per_page=100" --paginate -q '.' 2>/dev/null | jq -s 'add') || {
-              echo "  Failed to fetch versions — skipping"
-              continue
-            }
-
-            TOTAL=$(echo "$VERSIONS" | jq 'length')
-            echo "  Total versions: $TOTAL"
-
-            if [ "$TOTAL" -le 1 ]; then
-              echo "  Skipping (1 or fewer versions)"
-              continue
-            fi
-
-            # Find the version ID tagged as "latest" — NEVER delete this
-            LATEST_ID=$(echo "$VERSIONS" | jq '[.[] | select(.metadata.container.tags | index("latest"))] | .[0].id // empty')
-
-            if [ -z "$LATEST_ID" ] || [ "$LATEST_ID" = "null" ]; then
-              echo "  WARNING: No 'latest' tag found — skipping package for safety"
-              continue
-            fi
-
-            echo "  Latest version ID: $LATEST_ID"
-
-            # Get tagged versions (excluding latest), sorted by created_at descending
-            KEEP_IDS=$(echo "$VERSIONS" | jq -r \
-              "[.[] | select(.id != $LATEST_ID) | select(.metadata.container.tags | length > 0)] | sort_by(.created_at) | reverse | .[0:${KEEP_VERSIONS}] | .[].id")
-
-            # Build safe set
-            SAFE_IDS="$LATEST_ID"
-            for KID in $KEEP_IDS; do
-              SAFE_IDS="$SAFE_IDS $KID"
-            done
-
-            # Process all versions
-            DELETE_COUNT=0
-            ALL_IDS=$(echo "$VERSIONS" | jq -r '.[].id')
-
-            for VID in $ALL_IDS; do
-              if echo "$SAFE_IDS" | grep -qw "$VID"; then
-                TOTAL_KEPT=$((TOTAL_KEPT + 1))
-                continue
-              fi
-
-              TAGS=$(echo "$VERSIONS" | jq -r ".[] | select(.id == $VID) | .metadata.container.tags | join(\", \")")
-
-              if [ "$DRY_RUN" = "true" ]; then
-                echo "  [DRY RUN] Would delete version $VID (tags: ${TAGS:-none})"
-              else
-                if gh api --method DELETE "/users/$OWNER/packages/container/$PKG/versions/$VID" 2>/dev/null; then
-                  echo "  Deleted version $VID (tags: ${TAGS:-none})"
-                else
-                  echo "  FAILED to delete version $VID — may need PAT with delete:packages scope"
-                fi
-                sleep 1
-              fi
-
-              DELETE_COUNT=$((DELETE_COUNT + 1))
-              TOTAL_DELETED=$((TOTAL_DELETED + 1))
-            done
-
-            echo "  Result: $DELETE_COUNT to prune, $(echo "$SAFE_IDS" | wc -w) kept"
-            echo ""
-          done
-
-          echo "=== Summary ==="
-          echo "Total to prune: $TOTAL_DELETED"
-          echo "Total kept: $TOTAL_KEPT"
-
-          if [ "$DRY_RUN" = "true" ]; then
-            echo ""
-            echo "This was a DRY RUN. Re-run with dry-run=false to actually delete."
-          fi
+      - name: Delete old versions
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ matrix.package }}
+          package-type: container
+          min-versions-to-keep: ${{ github.event.inputs.keep-versions || 6 }}
+          delete-only-untagged-versions: false
+          token: ${{ secrets.GITHUB_TOKEN }}
