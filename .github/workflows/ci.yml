@@ -306,8 +306,9 @@ jobs:
             && upload sonarcloud passed '{"total":1,"passed":1,"failed":0}' "Quality gate passed" \
             || upload sonarcloud failed '{"total":1,"passed":0,"failed":1}' "SonarCloud failed"
 
-          # E2E (Playwright)
+          # E2E (Playwright) — use step outcome as primary signal (accounts for retries)
           if [ "${{ inputs.run-e2e }}" = "true" ]; then
+            E2E_OUTCOME="${{ steps.e2e.outcome }}"
             RESULTS_FILE="${{ inputs.working-directory }}/test-results.json"
             if [ -f "$RESULTS_FILE" ]; then
               TOTAL=$(jq '((.stats.expected//0)+(.stats.unexpected//0)+(.stats.skipped//0))' "$RESULTS_FILE")
@@ -315,10 +316,11 @@ jobs:
               FAILED=$(jq '.stats.unexpected//0' "$RESULTS_FILE")
               SKIPPED=$(jq '.stats.skipped//0' "$RESULTS_FILE")
               DUR=$(jq '.stats.duration//0|floor' "$RESULTS_FILE")
-              [ "$FAILED" -gt 0 ] && E2E_S=failed || E2E_S=passed
+              # Step outcome is authoritative — JSON unexpected count includes retried tests
+              [ "$E2E_OUTCOME" = "success" ] && E2E_S=passed || E2E_S=failed
               upload playwright-e2e "$E2E_S" "{\"total\":$TOTAL,\"passed\":$PASSED,\"failed\":$FAILED,\"skipped\":$SKIPPED}" "$PASSED/$TOTAL passed" "$DUR"
             else
-              [ "${{ steps.e2e.outcome }}" = "success" ] \
+              [ "$E2E_OUTCOME" = "success" ] \
                 && upload playwright-e2e passed '{"total":1,"passed":1,"failed":0}' "E2E passed" \
                 || upload playwright-e2e failed '{"total":1,"passed":0,"failed":1}' "E2E failed"
             fi
