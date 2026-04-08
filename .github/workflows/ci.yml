@@ -321,21 +321,18 @@ jobs:
             JEST_TOTAL=$(jq '.numTotalTests // 0' /tmp/jest-output.json 2>/dev/null || echo 0)
             JEST_PASSED_N=$(jq '.numPassedTests // 0' /tmp/jest-output.json 2>/dev/null || echo 0)
             JEST_FAILED_N=$(jq '.numFailedTests // 0' /tmp/jest-output.json 2>/dev/null || echo 0)
-            JEST_DUR=$(jq '([.testResults[]?.perfStats? | ((.end // 0) - (.start // 0))] | add // 0) | floor' /tmp/jest-output.json 2>/dev/null || echo 0)
+            JEST_DUR=$(jq '([.testResults[]? | ((.endTime // 0) - (.startTime // 0))] | add // 0) | floor' /tmp/jest-output.json 2>/dev/null || echo 0)
             JEST_PHASES=$(jq -c '[.testResults[]? | {
-              name: (.testFilePath | split("/") | last),
-              spec: .testFilePath,
-              status: (if .numFailingTests > 0 then "failed" else "passed" end),
-              duration_ms: ((.perfStats.end // 0) - (.perfStats.start // 0)),
+              name: (.name | split("/") | last),
+              spec: .name,
+              status: (if ([.assertionResults[] | select(.status == "failed")] | length) > 0 then "failed" else "passed" end),
+              duration_ms: ((.endTime // 0) - (.startTime // 0)),
               stats: { total: (.assertionResults | length), passed: ([.assertionResults[] | select(.status == "passed")] | length), failed: ([.assertionResults[] | select(.status == "failed")] | length) },
-              tests: [.assertionResults[] |
-                (.ancestorTitles | join(" > ")) as $ctx |
+              tests: [.assertionResults[] | .fullName as $n |
                 if .status == "failed" then
-                  "\(if $ctx != "" then $ctx + " > " else "" end)\(.title) — FAILED\(if .failureMessages[0]? then ": \(.failureMessages[0] | split("\n") | first)" else "" end)"
-                elif .status == "pending" then
-                  "\(if $ctx != "" then $ctx + " > " else "" end)\(.title) — SKIPPED"
-                else
-                  "\(if $ctx != "" then $ctx + " > " else "" end)\(.title) — PASSED"
+                  ($n + " — FAILED" + (if (.failureMessages | length) > 0 then (": " + (.failureMessages[0] | tostring | split("\n") | .[0])) else "" end))
+                elif .status == "pending" then ($n + " — SKIPPED")
+                else ($n + " — PASSED")
                 end
               ]
             }]' /tmp/jest-output.json 2>/dev/null || echo '[]')
