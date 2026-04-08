@@ -318,30 +318,34 @@ jobs:
               DUR=$(jq '.stats.duration//0|floor' "$RESULTS_FILE")
 
               # Extract per-spec phases with individual test names and errors
-              PHASES=$(jq -c '[.suites[]? | . as $suite | {
-                name: $suite.title,
-                spec: ($suite.file // $suite.title),
-                status: (if ([$suite.specs[]?.tests[]? | select(.status == "unexpected")] | length) > 0 then "failed" else "passed" end),
-                duration_ms: ([$suite.specs[]?.tests[]?.results[]?.duration // 0] | add // 0),
-                stats: {
-                  total: ([$suite.specs[]?] | length),
-                  passed: ([$suite.specs[]? | select(all(.tests[]?; .status == "expected"))] | length),
-                  failed: ([$suite.specs[]? | select(any(.tests[]?; .status == "unexpected"))] | length)
-                },
-                tests: [$suite.specs[]? | {
-                  title: .title,
-                  status: (if any(.tests[]?; .status == "expected") then "passed"
-                           elif any(.tests[]?; .status == "skipped") then "skipped"
-                           else "failed" end),
-                  duration: ([.tests[]?.results[]?.duration // 0] | add // 0),
-                  error: ([.tests[]?.results[]? | select(.status != "passed" and .status != "skipped") | .error?.message // empty] | first // null)
-                } | (.title) as $t |
-                  if .status == "failed" and .error then "\($t) — FAILED: \(.error)"
-                  elif .status == "failed" then "\($t) — FAILED"
-                  elif .status == "skipped" then "\($t) — SKIPPED"
-                  else "\($t) — PASSED" end
-                ]
-              }]' "$RESULTS_FILE" 2>/dev/null || echo '[]')
+              # Playwright nests: suites[] (file) → suites[] (describe) → specs[] (test)
+              PHASES=$(jq -c '
+                [.suites[]? | .title as $file | .file as $path |
+                  # Collect all specs: direct + nested suites
+                  ( (.specs // []) + [.suites[]? | .specs[]?] | flatten ) as $allSpecs |
+                  {
+                    name: $file,
+                    spec: ($path // $file),
+                    status: (if ([$allSpecs[]?.tests[]? | select(.status == "unexpected")] | length) > 0 then "failed" else "passed" end),
+                    duration_ms: ([$allSpecs[]?.tests[]?.results[]?.duration // 0] | add // 0),
+                    stats: {
+                      total: ($allSpecs | length),
+                      passed: ([$allSpecs[]? | select(all(.tests[]?; .status == "expected"))] | length),
+                      failed: ([$allSpecs[]? | select(any(.tests[]?; .status == "unexpected"))] | length)
+                    },
+                    tests: [$allSpecs[]? |
+                      (.title) as $t |
+                      (if any(.tests[]?; .status == "expected") then "passed"
+                       elif any(.tests[]?; .status == "skipped") then "skipped"
+                       else "failed" end) as $st |
+                      ([.tests[]?.results[]? | select(.error) | .error.message // empty] | first // null) as $err |
+                      if $st == "failed" and $err then "\($t) — FAILED: \($err | split("\n") | first)"
+                      elif $st == "failed" then "\($t) — FAILED"
+                      elif $st == "skipped" then "\($t) — SKIPPED"
+                      else "\($t) — PASSED" end
+                    ]
+                  }
+                ]' "$RESULTS_FILE" 2>/dev/null || echo '[]')
 
               [ "$E2E_OUTCOME" = "success" ] && E2E_S=passed || E2E_S=failed
               upload playwright-e2e "$E2E_S" "{\"total\":$TOTAL,\"passed\":$PASSED,\"failed\":$FAILED,\"skipped\":$SKIPPED}" "$PASSED/$TOTAL passed" "$DUR" "$PHASES"
