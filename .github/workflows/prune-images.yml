@@ -45,4 +45,4 @@ jobs:
           owner: kschmidtlarsen
           min-versions-to-keep: ${{ github.event.inputs.keep-versions || 6 }}
           delete-only-untagged-versions: false
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PACKAGE_CLEANUP_TOKEN }}
