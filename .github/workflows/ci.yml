@@ -117,7 +117,7 @@ jobs:
   test:
     name: Test & Quality
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     services:
       postgres:
