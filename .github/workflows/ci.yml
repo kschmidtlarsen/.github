@@ -140,6 +140,7 @@ jobs:
       DB_NAME: ${{ inputs.db-name }}
       DB_USER: ${{ inputs.db-user }}
       DB_PASSWORD: ${{ inputs.db-password }}
+      DATABASE_URL: postgresql://${{ inputs.db-user }}:${{ inputs.db-password }}@localhost:5432/${{ inputs.db-name }}
       NODE_ENV: test
       CI: true
 
@@ -238,6 +239,7 @@ jobs:
         id: e2e
         if: inputs.run-e2e
         working-directory: ${{ inputs.working-directory }}
+        timeout-minutes: 5
         run: |
           GREP_ARG=""
           if [ -n "${{ inputs.e2e-grep }}" ]; then GREP_ARG="--grep ${{ inputs.e2e-grep }}"; fi
