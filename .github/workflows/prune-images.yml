@@ -17,6 +17,7 @@ on:
 env:
   KEEP_VERSIONS: ${{ github.event.inputs.keep-versions || 5 }}
   DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
+  OWNER: kschmidtlarsen
 
 jobs:
   prune:
@@ -30,6 +31,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+
           echo "=== Docker Image Pruning ==="
           echo "Keep versions: $KEEP_VERSIONS (plus latest)"
           echo "Dry run: $DRY_RUN"
@@ -38,14 +41,21 @@ jobs:
           TOTAL_DELETED=0
           TOTAL_KEPT=0
 
-          # List all container packages
-          PACKAGES=$(gh api /user/packages?package_type=container --paginate -q '.[].name')
+          # List all container packages for the user
+          PACKAGES=$(gh api "/users/$OWNER/packages?package_type=container&per_page=100" -q '.[].name' 2>&1) || {
+            echo "Failed to list packages: $PACKAGES"
+            exit 1
+          }
 
           for PKG in $PACKAGES; do
             echo "--- Package: $PKG ---"
 
-            # Get all versions (paginated)
-            VERSIONS=$(gh api "/user/packages/container/$PKG/versions" --paginate 2>/dev/null || echo "[]")
+            # Get all versions (paginated, collect into single array)
+            VERSIONS=$(gh api "/users/$OWNER/packages/container/$PKG/versions?per_page=100" --paginate -q '.' 2>/dev/null | jq -s 'add') || {
+              echo "  Failed to fetch versions — skipping"
+              continue
+            }
+
             TOTAL=$(echo "$VERSIONS" | jq 'length')
             echo "  Total versions: $TOTAL"
 
@@ -57,7 +67,7 @@ jobs:
             # Find the version ID tagged as "latest" — NEVER delete this
             LATEST_ID=$(echo "$VERSIONS" | jq '[.[] | select(.metadata.container.tags | index("latest"))] | .[0].id // empty')
 
-            if [ -z "$LATEST_ID" ]; then
+            if [ -z "$LATEST_ID" ] || [ "$LATEST_ID" = "null" ]; then
               echo "  WARNING: No 'latest' tag found — skipping package for safety"
               continue
             fi
@@ -65,17 +75,16 @@ jobs:
             echo "  Latest version ID: $LATEST_ID"
 
             # Get tagged versions (excluding latest), sorted by created_at descending
-            # Keep the N most recent
             KEEP_IDS=$(echo "$VERSIONS" | jq -r \
-              "[.[] | select(.id != $LATEST_ID) | select(.metadata.container.tags | length > 0)] | sort_by(.created_at) | reverse | .[0:$KEEP_VERSIONS] | .[].id")
+              "[.[] | select(.id != $LATEST_ID) | select(.metadata.container.tags | length > 0)] | sort_by(.created_at) | reverse | .[0:${KEEP_VERSIONS}] | .[].id")
 
-            # Build safe set (latest + kept)
+            # Build safe set
             SAFE_IDS="$LATEST_ID"
             for KID in $KEEP_IDS; do
               SAFE_IDS="$SAFE_IDS $KID"
             done
 
-            # Find versions to delete
+            # Process all versions
             DELETE_COUNT=0
             ALL_IDS=$(echo "$VERSIONS" | jq -r '.[].id')
 
@@ -86,27 +95,28 @@ jobs:
               fi
 
               TAGS=$(echo "$VERSIONS" | jq -r ".[] | select(.id == $VID) | .metadata.container.tags | join(\", \")")
-              CREATED=$(echo "$VERSIONS" | jq -r ".[] | select(.id == $VID) | .created_at")
 
               if [ "$DRY_RUN" = "true" ]; then
-                echo "  [DRY RUN] Would delete version $VID (tags: ${TAGS:-none}, created: $CREATED)"
+                echo "  [DRY RUN] Would delete version $VID (tags: ${TAGS:-none})"
               else
-                gh api --method DELETE "/user/packages/container/$PKG/versions/$VID" 2>/dev/null \
-                  && echo "  Deleted version $VID (tags: ${TAGS:-none})" \
-                  || echo "  FAILED to delete version $VID"
-                sleep 1  # Rate limit: max 100 deletes/min
+                if gh api --method DELETE "/users/$OWNER/packages/container/$PKG/versions/$VID" 2>/dev/null; then
+                  echo "  Deleted version $VID (tags: ${TAGS:-none})"
+                else
+                  echo "  FAILED to delete version $VID — may need PAT with delete:packages scope"
+                fi
+                sleep 1
               fi
 
               DELETE_COUNT=$((DELETE_COUNT + 1))
               TOTAL_DELETED=$((TOTAL_DELETED + 1))
             done
 
-            echo "  Result: $DELETE_COUNT to delete, $(echo "$SAFE_IDS" | wc -w) kept"
+            echo "  Result: $DELETE_COUNT to prune, $(echo "$SAFE_IDS" | wc -w) kept"
             echo ""
           done
 
           echo "=== Summary ==="
-          echo "Total deleted: $TOTAL_DELETED"
+          echo "Total to prune: $TOTAL_DELETED"
           echo "Total kept: $TOTAL_KEPT"
 
           if [ "$DRY_RUN" = "true" ]; then
