@@ -1,0 +1,115 @@
+name: Prune Docker Images
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'  # Every Sunday at 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Dry run (log only, no deletions)'
+        type: boolean
+        default: true
+      keep-versions:
+        description: 'Number of tagged versions to keep per package (besides latest)'
+        type: number
+        default: 5
+
+env:
+  KEEP_VERSIONS: ${{ github.event.inputs.keep-versions || 5 }}
+  DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
+
+jobs:
+  prune:
+    name: Prune Old Package Versions
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+
+    steps:
+      - name: Prune ghcr.io images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== Docker Image Pruning ==="
+          echo "Keep versions: $KEEP_VERSIONS (plus latest)"
+          echo "Dry run: $DRY_RUN"
+          echo ""
+
+          TOTAL_DELETED=0
+          TOTAL_KEPT=0
+
+          # List all container packages
+          PACKAGES=$(gh api /user/packages?package_type=container --paginate -q '.[].name')
+
+          for PKG in $PACKAGES; do
+            echo "--- Package: $PKG ---"
+
+            # Get all versions (paginated)
+            VERSIONS=$(gh api "/user/packages/container/$PKG/versions" --paginate 2>/dev/null || echo "[]")
+            TOTAL=$(echo "$VERSIONS" | jq 'length')
+            echo "  Total versions: $TOTAL"
+
+            if [ "$TOTAL" -le 1 ]; then
+              echo "  Skipping (1 or fewer versions)"
+              continue
+            fi
+
+            # Find the version ID tagged as "latest" — NEVER delete this
+            LATEST_ID=$(echo "$VERSIONS" | jq '[.[] | select(.metadata.container.tags | index("latest"))] | .[0].id // empty')
+
+            if [ -z "$LATEST_ID" ]; then
+              echo "  WARNING: No 'latest' tag found — skipping package for safety"
+              continue
+            fi
+
+            echo "  Latest version ID: $LATEST_ID"
+
+            # Get tagged versions (excluding latest), sorted by created_at descending
+            # Keep the N most recent
+            KEEP_IDS=$(echo "$VERSIONS" | jq -r \
+              "[.[] | select(.id != $LATEST_ID) | select(.metadata.container.tags | length > 0)] | sort_by(.created_at) | reverse | .[0:$KEEP_VERSIONS] | .[].id")
+
+            # Build safe set (latest + kept)
+            SAFE_IDS="$LATEST_ID"
+            for KID in $KEEP_IDS; do
+              SAFE_IDS="$SAFE_IDS $KID"
+            done
+
+            # Find versions to delete
+            DELETE_COUNT=0
+            ALL_IDS=$(echo "$VERSIONS" | jq -r '.[].id')
+
+            for VID in $ALL_IDS; do
+              if echo "$SAFE_IDS" | grep -qw "$VID"; then
+                TOTAL_KEPT=$((TOTAL_KEPT + 1))
+                continue
+              fi
+
+              TAGS=$(echo "$VERSIONS" | jq -r ".[] | select(.id == $VID) | .metadata.container.tags | join(\", \")")
+              CREATED=$(echo "$VERSIONS" | jq -r ".[] | select(.id == $VID) | .created_at")
+
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "  [DRY RUN] Would delete version $VID (tags: ${TAGS:-none}, created: $CREATED)"
+              else
+                gh api --method DELETE "/user/packages/container/$PKG/versions/$VID" 2>/dev/null \
+                  && echo "  Deleted version $VID (tags: ${TAGS:-none})" \
+                  || echo "  FAILED to delete version $VID"
+                sleep 1  # Rate limit: max 100 deletes/min
+              fi
+
+              DELETE_COUNT=$((DELETE_COUNT + 1))
+              TOTAL_DELETED=$((TOTAL_DELETED + 1))
+            done
+
+            echo "  Result: $DELETE_COUNT to delete, $(echo "$SAFE_IDS" | wc -w) kept"
+            echo ""
+          done
+
+          echo "=== Summary ==="
+          echo "Total deleted: $TOTAL_DELETED"
+          echo "Total kept: $TOTAL_KEPT"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo ""
+            echo "This was a DRY RUN. Re-run with dry-run=false to actually delete."
+          fi
