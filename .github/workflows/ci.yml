@@ -184,11 +184,17 @@ jobs:
         run: npm run lint
         continue-on-error: ${{ inputs.lint-hard-fail == false }}
 
+      - name: Capture ESLint JSON
+        if: always()
+        working-directory: ${{ inputs.working-directory }}
+        run: npx eslint src/ --ext .js -f json -o /tmp/eslint-output.json 2>/dev/null || true
+        continue-on-error: true
+
       # ── Unit Tests ────────────────────────────────────
       - name: Unit tests
         id: unit
         working-directory: ${{ inputs.working-directory }}
-        run: ${{ inputs.test-command }}
+        run: ${{ inputs.test-command }} --json --outputFile=/tmp/jest-output.json
         timeout-minutes: 5
         continue-on-error: true
 
@@ -280,25 +286,92 @@ jobs:
 
           echo "Uploading results to Forseti..."
 
-          # Lint
-          [ "${{ steps.lint.outcome }}" = "success" ] \
-            && upload eslint passed '{"total":1,"passed":1,"failed":0}' "ESLint passed" \
-            || upload eslint failed '{"total":1,"passed":0,"failed":1}' "ESLint failed"
+          # Lint — parse per-file results from ESLint JSON
+          LINT_PHASES='[]'
+          if [ -f /tmp/eslint-output.json ]; then
+            LINT_TOTAL=$(jq 'length' /tmp/eslint-output.json 2>/dev/null || echo 0)
+            LINT_ERRORS=$(jq '[.[] | select(.errorCount > 0)] | length' /tmp/eslint-output.json 2>/dev/null || echo 0)
+            LINT_WARNINGS=$(jq '[.[] | .warningCount] | add // 0' /tmp/eslint-output.json 2>/dev/null || echo 0)
+            LINT_PASSED=$((LINT_TOTAL - LINT_ERRORS))
+            LINT_PHASES=$(jq -c '[.[] | select(.messages | length > 0) | {
+              name: (.filePath | split("/") | last),
+              spec: .filePath,
+              status: (if .errorCount > 0 then "failed" else "passed" end),
+              stats: { total: (.errorCount + .warningCount), passed: 0, failed: .errorCount },
+              tests: [.messages[] | "\(.ruleId // "parse-error") line \(.line) — \(if .severity == 2 then "FAILED" else "WARNING" end): \(.message)"]
+            }]' /tmp/eslint-output.json 2>/dev/null || echo '[]')
+            LINT_SUM="$LINT_PASSED/$LINT_TOTAL files clean, $LINT_WARNINGS warnings"
+          fi
+          if [ "${{ steps.lint.outcome }}" = "success" ]; then
+            upload eslint passed "{\"total\":${LINT_TOTAL:-1},\"passed\":${LINT_PASSED:-1},\"failed\":0}" "${LINT_SUM:-ESLint passed}" 0 "$LINT_PHASES"
+          else
+            upload eslint failed "{\"total\":${LINT_TOTAL:-1},\"passed\":${LINT_PASSED:-0},\"failed\":${LINT_ERRORS:-1}}" "${LINT_SUM:-ESLint failed}" 0 "$LINT_PHASES"
+          fi
 
-          # Unit tests
-          [ "${{ steps.unit.outcome }}" = "success" ] \
-            && upload jest-unit passed '{"total":1,"passed":1,"failed":0}' "Unit tests passed" \
-            || upload jest-unit failed '{"total":1,"passed":0,"failed":1}' "Unit tests failed"
+          # Unit tests — parse per-suite results from Jest JSON
+          JEST_PHASES='[]'
+          if [ -f /tmp/jest-output.json ]; then
+            JEST_TOTAL=$(jq '.numTotalTests // 0' /tmp/jest-output.json 2>/dev/null || echo 0)
+            JEST_PASSED_N=$(jq '.numPassedTests // 0' /tmp/jest-output.json 2>/dev/null || echo 0)
+            JEST_FAILED_N=$(jq '.numFailedTests // 0' /tmp/jest-output.json 2>/dev/null || echo 0)
+            JEST_DUR=$(jq '([.testResults[]?.perfStats? | ((.end // 0) - (.start // 0))] | add // 0) | floor' /tmp/jest-output.json 2>/dev/null || echo 0)
+            JEST_PHASES=$(jq -c '[.testResults[]? | {
+              name: (.testFilePath | split("/") | last),
+              spec: .testFilePath,
+              status: (if .numFailingTests > 0 then "failed" else "passed" end),
+              duration_ms: ((.perfStats.end // 0) - (.perfStats.start // 0)),
+              stats: { total: (.assertionResults | length), passed: ([.assertionResults[] | select(.status == "passed")] | length), failed: ([.assertionResults[] | select(.status == "failed")] | length) },
+              tests: [.assertionResults[] |
+                (.ancestorTitles | join(" > ")) as $ctx |
+                if .status == "failed" then
+                  "\(if $ctx != "" then $ctx + " > " else "" end)\(.title) — FAILED\(if .failureMessages[0]? then ": \(.failureMessages[0] | split("\n") | first)" else "" end)"
+                elif .status == "pending" then
+                  "\(if $ctx != "" then $ctx + " > " else "" end)\(.title) — SKIPPED"
+                else
+                  "\(if $ctx != "" then $ctx + " > " else "" end)\(.title) — PASSED"
+                end
+              ]
+            }]' /tmp/jest-output.json 2>/dev/null || echo '[]')
+            JEST_SUM="$JEST_PASSED_N/$JEST_TOTAL passed"
+          fi
+          if [ "${{ steps.unit.outcome }}" = "success" ]; then
+            upload jest-unit passed "{\"total\":${JEST_TOTAL:-1},\"passed\":${JEST_PASSED_N:-1},\"failed\":0}" "${JEST_SUM:-Unit tests passed}" "${JEST_DUR:-0}" "$JEST_PHASES"
+          else
+            upload jest-unit failed "{\"total\":${JEST_TOTAL:-1},\"passed\":${JEST_PASSED_N:-0},\"failed\":${JEST_FAILED_N:-1}}" "${JEST_SUM:-Unit tests failed}" "${JEST_DUR:-0}" "$JEST_PHASES"
+          fi
 
-          # npm audit
+          # npm audit — parse per-severity breakdown
           if [ "${{ inputs.run-npm-audit }}" = "true" ]; then
+            AUDIT_PHASES='[]'
             VULNS=0
             if [ -f /tmp/audit-output.json ]; then
               VULNS=$(jq '[.metadata.vulnerabilities // {} | to_entries[] | .value] | add // 0' /tmp/audit-output.json 2>/dev/null || echo 0)
+              AUDIT_PHASES=$(jq -c '
+                (.metadata.vulnerabilities // {}) as $v |
+                (.vulnerabilities // {} | to_entries | group_by(.value.severity)) as $groups |
+                [if ($v | to_entries | map(.value) | add // 0) > 0 then
+                  {
+                    name: "Vulnerabilities",
+                    status: "failed",
+                    stats: { total: ($v | to_entries | map(.value) | add // 0), passed: 0, failed: ($v | to_entries | map(.value) | add // 0) },
+                    tests: [.vulnerabilities // {} | to_entries[:20][] |
+                      "\(.value.name) (\(.value.severity)) — FAILED: \(.value.title // "no details") via \(.value.via | if type == "array" then [.[] | if type == "string" then . else .name // "?" end] | join(", ") else "?" end)"
+                    ]
+                  }
+                else
+                  {
+                    name: "Dependencies",
+                    status: "passed",
+                    stats: { total: 1, passed: 1, failed: 0 },
+                    tests: ["All dependencies clean — PASSED"]
+                  }
+                end]' /tmp/audit-output.json 2>/dev/null || echo '[]')
             fi
-            [ "$VULNS" = "0" ] \
-              && upload npm-audit passed '{"total":1,"passed":1,"failed":0}' "No vulnerabilities" \
-              || upload npm-audit failed "{\"total\":1,\"passed\":0,\"failed\":1}" "$VULNS vulnerabilities"
+            if [ "$VULNS" = "0" ]; then
+              upload npm-audit passed '{"total":1,"passed":1,"failed":0}' "No vulnerabilities" 0 "$AUDIT_PHASES"
+            else
+              upload npm-audit failed "{\"total\":1,\"passed\":0,\"failed\":1}" "$VULNS vulnerabilities" 0 "$AUDIT_PHASES"
+            fi
           fi
 
           # SonarCloud
