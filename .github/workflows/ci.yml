@@ -194,8 +194,15 @@ jobs:
       - name: Unit tests
         id: unit
         working-directory: ${{ inputs.working-directory }}
-        run: ${{ inputs.test-command }} --json --outputFile=/tmp/jest-output.json
+        run: ${{ inputs.test-command }}
         timeout-minutes: 5
+        continue-on-error: true
+
+      - name: Capture Jest JSON
+        if: always()
+        working-directory: ${{ inputs.working-directory }}
+        run: npx jest --json --outputFile=/tmp/jest-output.json --passWithNoTests --forceExit 2>/dev/null || true
+        timeout-minutes: 3
         continue-on-error: true
 
       - name: Fix coverage paths
