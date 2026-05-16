@@ -1,0 +1,431 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sweep Tests — source-code test types run on schedule, not on push
+# Triggered by Forseti's scheduler via repository_dispatch (event_type=sweep-tests)
+# Each project has a sweep.yml that calls this reusable workflow.
+#
+# Inputs run-id-* come from Forseti — it pre-inserts test_run rows tagged with
+# sweep_run_group, then dispatches this workflow with those run_ids in the
+# client_payload. Uploads UPDATE the pre-inserted rows (ON CONFLICT), keeping
+# the sweep_run_group linkage so the sweep completion check works.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: Sweep Tests (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      project-id:
+        description: 'Forseti project ID'
+        required: true
+        type: string
+      run-id-eslint:
+        description: 'Pre-allocated test_runs.run_id for the eslint result'
+        required: false
+        type: string
+        default: ''
+      run-id-jest-unit:
+        required: false
+        type: string
+        default: ''
+      run-id-npm-audit:
+        required: false
+        type: string
+        default: ''
+      run-id-sonarcloud:
+        required: false
+        type: string
+        default: ''
+      run-id-playwright-e2e:
+        required: false
+        type: string
+        default: ''
+      node-version:
+        required: false
+        type: string
+        default: '20'
+      working-directory:
+        required: false
+        type: string
+        default: 'backend'
+      needs-postgres:
+        required: false
+        type: boolean
+        default: true
+      postgres-version:
+        required: false
+        type: string
+        default: '17'
+      db-name:
+        required: false
+        type: string
+        default: 'test_db'
+      db-user:
+        required: false
+        type: string
+        default: 'test_user'
+      db-password:
+        required: false
+        type: string
+        default: 'testpassword'
+      db-init-command:
+        required: false
+        type: string
+        default: ''
+      test-command:
+        required: false
+        type: string
+        default: 'npm test -- --coverage --coverageReporters=lcov'
+      lint-hard-fail:
+        required: false
+        type: boolean
+        default: false
+      run-npm-audit:
+        required: false
+        type: boolean
+        default: true
+      fix-coverage-paths:
+        required: false
+        type: boolean
+        default: false
+      run-e2e:
+        required: false
+        type: boolean
+        default: true
+      e2e-grep:
+        required: false
+        type: string
+        default: ''
+      cache-playwright:
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  sweep:
+    name: Sweep — Source Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:${{ inputs.postgres-version }}
+        env:
+          POSTGRES_DB: ${{ inputs.db-name }}
+          POSTGRES_USER: ${{ inputs.db-user }}
+          POSTGRES_PASSWORD: ${{ inputs.db-password }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_NAME: ${{ inputs.db-name }}
+      DB_USER: ${{ inputs.db-user }}
+      DB_PASSWORD: ${{ inputs.db-password }}
+      DATABASE_URL: postgresql://${{ inputs.db-user }}:${{ inputs.db-password }}@localhost:5432/${{ inputs.db-name }}
+      NODE_ENV: test
+      CI: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: npm ci
+
+      - name: Install PostgreSQL client
+        if: inputs.needs-postgres && inputs.db-init-command != ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client > /dev/null
+
+      - name: Initialize database
+        if: inputs.needs-postgres && inputs.db-init-command != ''
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGDATABASE: ${{ inputs.db-name }}
+          PGUSER: ${{ inputs.db-user }}
+          PGPASSWORD: ${{ inputs.db-password }}
+        run: ${{ inputs.db-init-command }}
+
+      - name: Lint
+        id: lint
+        working-directory: ${{ inputs.working-directory }}
+        run: npm run lint
+        continue-on-error: ${{ inputs.lint-hard-fail == false }}
+
+      - name: Capture ESLint JSON
+        if: always()
+        working-directory: ${{ inputs.working-directory }}
+        run: npx eslint src/ --ext .js -f json -o /tmp/eslint-output.json 2>/dev/null || true
+        continue-on-error: true
+
+      - name: Unit tests
+        id: unit
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.test-command }}
+        timeout-minutes: 5
+        continue-on-error: true
+
+      - name: Capture Jest JSON
+        if: always()
+        working-directory: ${{ inputs.working-directory }}
+        run: npx jest --json --outputFile=/tmp/jest-output.json --passWithNoTests --forceExit 2>/dev/null || true
+        timeout-minutes: 3
+        continue-on-error: true
+
+      - name: Fix coverage paths
+        if: inputs.fix-coverage-paths
+        run: |
+          LCOV="${{ inputs.working-directory }}/coverage/lcov.info"
+          if [ -f "$LCOV" ]; then
+            sed -i "s|SF:src/|SF:${{ inputs.working-directory }}/src/|g" "$LCOV"
+          fi
+
+      - name: npm audit
+        id: audit
+        if: inputs.run-npm-audit
+        working-directory: ${{ inputs.working-directory }}
+        run: npm audit --audit-level=moderate --json > /tmp/audit-output.json 2>&1 || true
+        continue-on-error: true
+
+      - name: SonarCloud Scan
+        id: sonar
+        uses: SonarSource/sonarcloud-github-action@v3
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Cache Playwright browsers
+        if: inputs.run-e2e && inputs.cache-playwright
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+
+      - name: Install Playwright browsers
+        if: inputs.run-e2e && (steps.pw-cache.outputs.cache-hit != 'true' || inputs.cache-playwright == false)
+        working-directory: ${{ inputs.working-directory }}
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright deps (cached)
+        if: inputs.run-e2e && inputs.cache-playwright && steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Run E2E tests
+        id: e2e
+        if: inputs.run-e2e
+        working-directory: ${{ inputs.working-directory }}
+        timeout-minutes: 5
+        run: |
+          GREP_ARG=""
+          if [ -n "${{ inputs.e2e-grep }}" ]; then GREP_ARG="--grep ${{ inputs.e2e-grep }}"; fi
+          npx playwright test --reporter=json,html $GREP_ARG
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_FILE: test-results.json
+        continue-on-error: true
+
+      # ─────────────────────────────────────────────────────────────────────────
+      # Upload all results to Forseti (UPDATEs Forseti's pre-inserted rows by
+      # run_id, so sweep_run_group tag persists).
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Upload results to Forseti
+        if: always()
+        env:
+          FORSETI_URL: https://forseti.exe.pm
+          PROJECT_ID: ${{ inputs.project-id }}
+          CF_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          BRANCH: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID_ESLINT: ${{ inputs.run-id-eslint }}
+          RUN_ID_JEST: ${{ inputs.run-id-jest-unit }}
+          RUN_ID_AUDIT: ${{ inputs.run-id-npm-audit }}
+          RUN_ID_SONAR: ${{ inputs.run-id-sonarcloud }}
+          RUN_ID_E2E: ${{ inputs.run-id-playwright-e2e }}
+        run: |
+          upload() {
+            local type="$1" run_id="$2" status="$3" stats="$4" summary="$5" duration="${6:-0}" phases="${7:-[]}"
+            local run_id_field=""
+            if [ -n "$run_id" ]; then
+              run_id_field="\"run_id\": \"$run_id\","
+            fi
+            curl -sf -X POST "$FORSETI_URL/api/results/upload/$PROJECT_ID" \
+              -H "Content-Type: application/json" \
+              -H "CF-Access-Client-Id: $CF_ID" \
+              -H "CF-Access-Client-Secret: $CF_SECRET" \
+              -d "{
+                $run_id_field
+                \"test_type\": \"$type\",
+                \"status\": \"$status\",
+                \"stats\": $stats,
+                \"summary\": \"$summary\",
+                \"duration_ms\": $duration,
+                \"source\": \"github-actions\",
+                \"phases\": $phases,
+                \"environment\": {\"branch\":\"$BRANCH\",\"commit\":\"$COMMIT\",\"url\":\"$RUN_URL\"}
+              }" > /dev/null && echo "  ✓ $type (run_id=$run_id)" || echo "  ✗ $type (upload failed)"
+          }
+
+          echo "Uploading results to Forseti..."
+
+          # Lint — parse per-file results from ESLint JSON
+          LINT_PHASES='[]'
+          if [ -f /tmp/eslint-output.json ]; then
+            LINT_TOTAL=$(jq 'length' /tmp/eslint-output.json 2>/dev/null || echo 0)
+            LINT_ERRORS=$(jq '[.[] | select(.errorCount > 0)] | length' /tmp/eslint-output.json 2>/dev/null || echo 0)
+            LINT_WARNINGS=$(jq '[.[] | .warningCount] | add // 0' /tmp/eslint-output.json 2>/dev/null || echo 0)
+            LINT_PASSED=$((LINT_TOTAL - LINT_ERRORS))
+            LINT_PHASES=$(jq -c '[.[] | select(.messages | length > 0) | {
+              name: (.filePath | split("/") | last),
+              spec: .filePath,
+              status: (if .errorCount > 0 then "failed" else "passed" end),
+              stats: { total: (.errorCount + .warningCount), passed: 0, failed: .errorCount },
+              tests: [.messages[] | "\(.ruleId // "parse-error") line \(.line) — \(if .severity == 2 then "FAILED" else "WARNING" end): \(.message)"]
+            }]' /tmp/eslint-output.json 2>/dev/null || echo '[]')
+            LINT_SUM="$LINT_PASSED/$LINT_TOTAL files clean, $LINT_WARNINGS warnings"
+          fi
+          if [ "${{ steps.lint.outcome }}" = "success" ]; then
+            upload eslint "$RUN_ID_ESLINT" passed "{\"total\":${LINT_TOTAL:-1},\"passed\":${LINT_PASSED:-1},\"failed\":0}" "${LINT_SUM:-ESLint passed}" 0 "$LINT_PHASES"
+          else
+            upload eslint "$RUN_ID_ESLINT" failed "{\"total\":${LINT_TOTAL:-1},\"passed\":${LINT_PASSED:-0},\"failed\":${LINT_ERRORS:-1}}" "${LINT_SUM:-ESLint failed}" 0 "$LINT_PHASES"
+          fi
+
+          # Unit tests — parse per-suite results from Jest JSON
+          JEST_PHASES='[]'
+          if [ -f /tmp/jest-output.json ]; then
+            JEST_TOTAL=$(jq '.numTotalTests // 0' /tmp/jest-output.json 2>/dev/null || echo 0)
+            JEST_PASSED_N=$(jq '.numPassedTests // 0' /tmp/jest-output.json 2>/dev/null || echo 0)
+            JEST_FAILED_N=$(jq '.numFailedTests // 0' /tmp/jest-output.json 2>/dev/null || echo 0)
+            JEST_DUR=$(jq '([.testResults[]? | ((.endTime // 0) - (.startTime // 0))] | add // 0) | floor' /tmp/jest-output.json 2>/dev/null || echo 0)
+            JEST_PHASES=$(jq -c '[.testResults[]? | {
+              name: (.name | split("/") | last),
+              spec: .name,
+              status: (if ([.assertionResults[] | select(.status == "failed")] | length) > 0 then "failed" else "passed" end),
+              duration_ms: ((.endTime // 0) - (.startTime // 0)),
+              stats: { total: (.assertionResults | length), passed: ([.assertionResults[] | select(.status == "passed")] | length), failed: ([.assertionResults[] | select(.status == "failed")] | length) },
+              tests: [.assertionResults[] | .fullName as $n |
+                if .status == "failed" then
+                  ($n + " — FAILED" + (if (.failureMessages | length) > 0 then (": " + (.failureMessages[0] | tostring | split("\n") | .[0])) else "" end))
+                elif .status == "pending" then ($n + " — SKIPPED")
+                else ($n + " — PASSED")
+                end
+              ]
+            }]' /tmp/jest-output.json 2>/dev/null || echo '[]')
+            JEST_SUM="$JEST_PASSED_N/$JEST_TOTAL passed"
+          fi
+          if [ "${{ steps.unit.outcome }}" = "success" ]; then
+            upload jest-unit "$RUN_ID_JEST" passed "{\"total\":${JEST_TOTAL:-1},\"passed\":${JEST_PASSED_N:-1},\"failed\":0}" "${JEST_SUM:-Unit tests passed}" "${JEST_DUR:-0}" "$JEST_PHASES"
+          else
+            upload jest-unit "$RUN_ID_JEST" failed "{\"total\":${JEST_TOTAL:-1},\"passed\":${JEST_PASSED_N:-0},\"failed\":${JEST_FAILED_N:-1}}" "${JEST_SUM:-Unit tests failed}" "${JEST_DUR:-0}" "$JEST_PHASES"
+          fi
+
+          # npm audit
+          if [ "${{ inputs.run-npm-audit }}" = "true" ]; then
+            AUDIT_PHASES='[]'
+            VULNS=0
+            if [ -f /tmp/audit-output.json ]; then
+              VULNS=$(jq '[.metadata.vulnerabilities // {} | to_entries[] | .value] | add // 0' /tmp/audit-output.json 2>/dev/null || echo 0)
+              AUDIT_PHASES=$(jq -c '
+                (.metadata.vulnerabilities // {}) as $v |
+                [if ($v | to_entries | map(.value) | add // 0) > 0 then
+                  {
+                    name: "Vulnerabilities",
+                    status: "failed",
+                    stats: { total: ($v | to_entries | map(.value) | add // 0), passed: 0, failed: ($v | to_entries | map(.value) | add // 0) },
+                    tests: [.vulnerabilities // {} | to_entries[:20][] |
+                      "\(.value.name) (\(.value.severity)) — FAILED: \(.value.title // "no details") via \(.value.via | if type == "array" then [.[] | if type == "string" then . else .name // "?" end] | join(", ") else "?" end)"
+                    ]
+                  }
+                else
+                  {
+                    name: "Dependencies",
+                    status: "passed",
+                    stats: { total: 1, passed: 1, failed: 0 },
+                    tests: ["All dependencies clean — PASSED"]
+                  }
+                end]' /tmp/audit-output.json 2>/dev/null || echo '[]')
+            fi
+            if [ "$VULNS" = "0" ]; then
+              upload npm-audit "$RUN_ID_AUDIT" passed '{"total":1,"passed":1,"failed":0}' "No vulnerabilities" 0 "$AUDIT_PHASES"
+            else
+              upload npm-audit "$RUN_ID_AUDIT" failed "{\"total\":1,\"passed\":0,\"failed\":1}" "$VULNS vulnerabilities" 0 "$AUDIT_PHASES"
+            fi
+          fi
+
+          # SonarCloud
+          [ "${{ steps.sonar.outcome }}" = "success" ] \
+            && upload sonarcloud "$RUN_ID_SONAR" passed '{"total":1,"passed":1,"failed":0}' "Quality gate passed" \
+            || upload sonarcloud "$RUN_ID_SONAR" failed '{"total":1,"passed":0,"failed":1}' "SonarCloud failed"
+
+          # E2E (Playwright)
+          if [ "${{ inputs.run-e2e }}" = "true" ]; then
+            E2E_OUTCOME="${{ steps.e2e.outcome }}"
+            RESULTS_FILE="${{ inputs.working-directory }}/test-results.json"
+            if [ -f "$RESULTS_FILE" ]; then
+              TOTAL=$(jq '((.stats.expected//0)+(.stats.unexpected//0)+(.stats.skipped//0))' "$RESULTS_FILE")
+              PASSED=$(jq '.stats.expected//0' "$RESULTS_FILE")
+              FAILED=$(jq '.stats.unexpected//0' "$RESULTS_FILE")
+              SKIPPED=$(jq '.stats.skipped//0' "$RESULTS_FILE")
+              DUR=$(jq '.stats.duration//0|floor' "$RESULTS_FILE")
+              PHASES=$(jq -c '
+                [.suites[]? | .title as $file | .file as $path |
+                  ( (.specs // []) + [.suites[]? | .specs[]?] | flatten ) as $allSpecs |
+                  {
+                    name: $file,
+                    spec: ($path // $file),
+                    status: (if ([$allSpecs[]?.tests[]? | select(.status == "unexpected")] | length) > 0 then "failed" else "passed" end),
+                    duration_ms: ([$allSpecs[]?.tests[]?.results[]?.duration // 0] | add // 0),
+                    stats: {
+                      total: ($allSpecs | length),
+                      passed: ([$allSpecs[]? | select(all(.tests[]?; .status == "expected"))] | length),
+                      failed: ([$allSpecs[]? | select(any(.tests[]?; .status == "unexpected"))] | length)
+                    },
+                    tests: [$allSpecs[]? |
+                      (.title) as $t |
+                      (if any(.tests[]?; .status == "expected") then "passed"
+                       elif any(.tests[]?; .status == "skipped") then "skipped"
+                       else "failed" end) as $st |
+                      ([.tests[]?.results[]? | select(.error) | .error.message // empty] | first // null) as $err |
+                      if $st == "failed" and $err then "\($t) — FAILED: \($err | split("\n") | first)"
+                      elif $st == "failed" then "\($t) — FAILED"
+                      elif $st == "skipped" then "\($t) — SKIPPED"
+                      else "\($t) — PASSED" end
+                    ]
+                  }
+                ]' "$RESULTS_FILE" 2>/dev/null || echo '[]')
+
+              [ "$E2E_OUTCOME" = "success" ] && E2E_S=passed || E2E_S=failed
+              upload playwright-e2e "$RUN_ID_E2E" "$E2E_S" "{\"total\":$TOTAL,\"passed\":$PASSED,\"failed\":$FAILED,\"skipped\":$SKIPPED}" "$PASSED/$TOTAL passed" "$DUR" "$PHASES"
+            else
+              [ "$E2E_OUTCOME" = "success" ] \
+                && upload playwright-e2e "$RUN_ID_E2E" passed '{"total":1,"passed":1,"failed":0}' "E2E passed" \
+                || upload playwright-e2e "$RUN_ID_E2E" failed '{"total":1,"passed":0,"failed":1}' "E2E failed"
+            fi
+          fi
+
+      - name: Upload Playwright Report
+        uses: actions/upload-artifact@v4
+        if: inputs.run-e2e && failure()
+        with:
+          name: playwright-report
+          path: ${{ inputs.working-directory }}/playwright-report/
+          retention-days: 5
