@@ -79,6 +79,11 @@ on:
         required: false
         type: boolean
         default: false
+      eslint-target:
+        description: 'Path eslint scans (matches npm run lint). Default src/ works for projects with a src tree; pass . for flat layouts.'
+        required: false
+        type: string
+        default: 'src/'
       run-npm-audit:
         required: false
         type: boolean
@@ -172,7 +177,7 @@ jobs:
       - name: Capture ESLint JSON
         if: always()
         working-directory: ${{ inputs.working-directory }}
-        run: npx eslint src/ --ext .js -f json -o /tmp/eslint-output.json 2>/dev/null || true
+        run: npx eslint ${{ inputs.eslint-target }} --ext .js -f json -o /tmp/eslint-output.json 2>/dev/null || true
         continue-on-error: true
 
       - name: Unit tests
