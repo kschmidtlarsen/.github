@@ -100,6 +100,11 @@ on:
         required: false
         type: string
         default: ''
+      e2e-timeout-minutes:
+        description: 'Max wall time for Run E2E tests step. Default 5; bump for projects with hundreds of tests.'
+        required: false
+        type: number
+        default: 5
       cache-playwright:
         required: false
         type: boolean
@@ -238,7 +243,7 @@ jobs:
         id: e2e
         if: inputs.run-e2e
         working-directory: ${{ inputs.working-directory }}
-        timeout-minutes: 5
+        timeout-minutes: ${{ inputs.e2e-timeout-minutes }}
         run: |
           GREP_ARG=""
           if [ -n "${{ inputs.e2e-grep }}" ]; then GREP_ARG="--grep ${{ inputs.e2e-grep }}"; fi
