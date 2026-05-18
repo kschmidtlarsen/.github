@@ -303,7 +303,9 @@ jobs:
             }]' /tmp/eslint-output.json 2>/dev/null || echo '[]')
             LINT_SUM="$LINT_PASSED/$LINT_TOTAL files clean, $LINT_WARNINGS warnings"
           fi
-          if [ "${{ steps.lint.outcome }}" = "success" ]; then
+          # Pass/fail driven by JSON errorCount, not step outcome.
+          # ESLint exits non-zero on warning thresholds too — warnings shouldn't fail the cell.
+          if [ "${LINT_ERRORS:-0}" -eq 0 ] && [ "${LINT_TOTAL:-0}" -gt 0 ]; then
             upload eslint "$RUN_ID_ESLINT" passed "{\"total\":${LINT_TOTAL:-1},\"passed\":${LINT_PASSED:-1},\"failed\":0}" "${LINT_SUM:-ESLint passed}" 0 "$LINT_PHASES"
           else
             upload eslint "$RUN_ID_ESLINT" failed "{\"total\":${LINT_TOTAL:-1},\"passed\":${LINT_PASSED:-0},\"failed\":${LINT_ERRORS:-1}}" "${LINT_SUM:-ESLint failed}" 0 "$LINT_PHASES"
@@ -332,7 +334,10 @@ jobs:
             }]' /tmp/jest-output.json 2>/dev/null || echo '[]')
             JEST_SUM="$JEST_PASSED_N/$JEST_TOTAL passed"
           fi
-          if [ "${{ steps.unit.outcome }}" = "success" ]; then
+          # Pass/fail driven by Jest's numFailedTests, not step outcome.
+          # Jest exits non-zero on coverage threshold misses with all tests passing.
+          # Zero total tests counts as a fail (matches Forseti's vacuous-pass rule).
+          if [ "${JEST_FAILED_N:-0}" -eq 0 ] && [ "${JEST_TOTAL:-0}" -gt 0 ]; then
             upload jest-unit "$RUN_ID_JEST" passed "{\"total\":${JEST_TOTAL:-1},\"passed\":${JEST_PASSED_N:-1},\"failed\":0}" "${JEST_SUM:-Unit tests passed}" "${JEST_DUR:-0}" "$JEST_PHASES"
           else
             upload jest-unit "$RUN_ID_JEST" failed "{\"total\":${JEST_TOTAL:-1},\"passed\":${JEST_PASSED_N:-0},\"failed\":${JEST_FAILED_N:-1}}" "${JEST_SUM:-Unit tests failed}" "${JEST_DUR:-0}" "$JEST_PHASES"
@@ -413,7 +418,9 @@ jobs:
                   }
                 ]' "$RESULTS_FILE" 2>/dev/null || echo '[]')
 
-              [ "$E2E_OUTCOME" = "success" ] && E2E_S=passed || E2E_S=failed
+              # Pass/fail driven by Playwright's unexpected count, not step outcome.
+              # Zero total tests counts as a fail (matches Forseti's vacuous-pass rule).
+              if [ "$FAILED" -eq 0 ] && [ "$TOTAL" -gt 0 ]; then E2E_S=passed; else E2E_S=failed; fi
               upload playwright-e2e "$RUN_ID_E2E" "$E2E_S" "{\"total\":$TOTAL,\"passed\":$PASSED,\"failed\":$FAILED,\"skipped\":$SKIPPED}" "$PASSED/$TOTAL passed" "$DUR" "$PHASES"
             else
               [ "$E2E_OUTCOME" = "success" ] \
