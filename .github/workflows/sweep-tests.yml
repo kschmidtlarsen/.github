@@ -278,21 +278,33 @@ jobs:
             if [ -n "$run_id" ]; then
               run_id_field="\"run_id\": \"$run_id\","
             fi
-            curl -sf -X POST "$FORSETI_URL/api/results/upload/$PROJECT_ID" \
-              -H "Content-Type: application/json" \
-              -H "CF-Access-Client-Id: $CF_ID" \
-              -H "CF-Access-Client-Secret: $CF_SECRET" \
-              -d "{
-                $run_id_field
-                \"test_type\": \"$type\",
-                \"status\": \"$status\",
-                \"stats\": $stats,
-                \"summary\": \"$summary\",
-                \"duration_ms\": $duration,
-                \"source\": \"github-actions\",
-                \"phases\": $phases,
-                \"environment\": {\"branch\":\"$BRANCH\",\"commit\":\"$COMMIT\",\"url\":\"$RUN_URL\"}
-              }" > /dev/null && echo "  ✓ $type (run_id=$run_id)" || echo "  ✗ $type (upload failed)"
+            local body="{
+              $run_id_field
+              \"test_type\": \"$type\",
+              \"status\": \"$status\",
+              \"stats\": $stats,
+              \"summary\": \"$summary\",
+              \"duration_ms\": $duration,
+              \"source\": \"github-actions\",
+              \"phases\": $phases,
+              \"environment\": {\"branch\":\"$BRANCH\",\"commit\":\"$COMMIT\",\"url\":\"$RUN_URL\"}
+            }"
+            # Retry up to 5x with backoff — Forseti may be redeploying and a
+            # single failed POST silently drops the result.
+            local attempt=1
+            while [ $attempt -le 5 ]; do
+              if curl -sf -X POST "$FORSETI_URL/api/results/upload/$PROJECT_ID" \
+                  -H "Content-Type: application/json" \
+                  -H "CF-Access-Client-Id: $CF_ID" \
+                  -H "CF-Access-Client-Secret: $CF_SECRET" \
+                  -d "$body" > /dev/null; then
+                echo "  ✓ $type (run_id=$run_id)"
+                return 0
+              fi
+              [ $attempt -lt 5 ] && sleep $((attempt * 3))
+              attempt=$((attempt + 1))
+            done
+            echo "  ✗ $type (upload failed after 5 attempts)"
           }
 
           echo "Uploading results to Forseti..."
