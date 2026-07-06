@@ -114,7 +114,11 @@ jobs:
   sweep:
     name: Sweep — Source Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Derive the job cap from the e2e budget so it can never be smaller than the
+    # e2e step it's meant to allow. +20 covers setup (checkout/npm ci/playwright
+    # install/db-init) plus the lint/jest/audit/sonar steps. Default e2e budget is
+    # 5, so the default job cap stays 25 (unchanged); calify's 35 → 55.
+    timeout-minutes: ${{ inputs.e2e-timeout-minutes + 20 }}
 
     services:
       postgres:
