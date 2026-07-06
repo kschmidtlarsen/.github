@@ -105,6 +105,11 @@ on:
         required: false
         type: number
         default: 5
+      job-timeout-minutes:
+        description: 'Max wall time for the whole sweep job. Must exceed e2e-timeout-minutes + setup (~5m) + other test steps, or a long e2e run gets cancelled mid-run. Default 25.'
+        required: false
+        type: number
+        default: 25
       cache-playwright:
         required: false
         type: boolean
@@ -114,11 +119,12 @@ jobs:
   sweep:
     name: Sweep — Source Tests
     runs-on: ubuntu-latest
-    # Derive the job cap from the e2e budget so it can never be smaller than the
-    # e2e step it's meant to allow. +20 covers setup (checkout/npm ci/playwright
-    # install/db-init) plus the lint/jest/audit/sonar steps. Default e2e budget is
-    # 5, so the default job cap stays 25 (unchanged); calify's 35 → 55.
-    timeout-minutes: ${{ inputs.e2e-timeout-minutes + 20 }}
+    # Must be >= e2e-timeout-minutes + setup (~5 min) + lint/jest/audit/sonar, or the
+    # job cap cancels a still-running e2e step mid-run (leaving no test-results.json →
+    # spurious total:1/failed:1). Default 25 is unchanged; repos with big e2e suites
+    # (e.g. calify) raise it to match their e2e budget. GHA expressions can't do
+    # arithmetic, so it's a separate explicit input rather than derived.
+    timeout-minutes: ${{ inputs.job-timeout-minutes }}
 
     services:
       postgres:
